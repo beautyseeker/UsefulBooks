@@ -1706,29 +1706,296 @@
   ```
 - 串口接收器(Serial receiver)
   ```Verilog
-  //
+  // 这一题思路跟前两题思路类似，只不过多了起始位和终止位来控制状态的转移，让人疑惑的是计数逻辑如果和状态更新逻辑放在一个always块内会通过不了仿真，但分离却能通过仿真，可能next_state更新和计数逻辑存在耦合。
+    module top_module(
+        input clk,
+        input in,
+        input reset,    // Synchronous reset
+        output done
+    ); 
+        parameter idle = 0, start = 1, sending = 2, stop = 3, error = 4;
+        reg [2:0] state, next_state;
+        int rcved_bits;
+        reg done_r;
+
+        always @(*) begin
+            case(state)
+                idle: next_state = in ? idle : start;
+                
+                start: next_state = sending;
+
+                sending:next_state = (rcved_bits == 8) ?
+                    in ? stop : error : sending;
+
+                error: next_state = in ? idle : error;
+                
+                stop:
+                    next_state = in ? idle : start;
+
+                default:
+                    next_state = idle;
+            endcase
+        end
+
+        always @(posedge clk) begin
+            if(reset)
+                state <= idle;
+            else
+                state <= next_state;
+        end
+
+        always @(posedge clk ) begin
+            if(reset)
+                rcved_bits <= 0;
+            else
+                case(next_state)
+                    start: rcved_bits <= 0;
+                    sending:
+                        rcved_bits <= rcved_bits + 1;
+                    default:;
+                endcase
+        end
+
+        assign done = state == stop;
+
+    endmodule
 
   ```
 - 串口接收器与数据路径(Serial receiver and datapath)
   ```Verilog
-  //
+  // 在上题基础上加一个data寄存器用于记录sending过程中的数据，哪怕思路简单也很难一次通过，慢慢看波形调试几遍才过的，注意data的更新顺序。
+    module top_module(
+        input clk,
+        input in,
+        input reset,    // Synchronous reset
+        output [7:0] out_byte,
+        output done
+    ); 
+    parameter idle = 0, start = 1, sending = 2, stop = 3, error = 4;
+    reg [2:0] state;
+    reg [2:0] next_state;
+    int bit_count;
+    reg [7:0] data;
 
+    always @(*) begin
+        case(state)
+            idle: 
+                next_state = in ? idle : start;
+
+            start: next_state = sending;
+
+            sending: begin
+                if(bit_count == 8)
+                    next_state = in ? stop : error;
+                else
+                    next_state = sending;
+            end
+
+            stop:
+                next_state = in ? idle : start;
+            
+            error:
+                next_state = in ? idle : error;
+            default: next_state = idle;
+        endcase
+    end
+
+    always @(posedge clk ) begin
+        if(reset)
+            state <= idle;
+        else
+            state <= next_state;
+    end
+
+    always @(posedge clk) begin
+        if(reset)
+            bit_count <= 0;
+        else
+            case(next_state)
+                start: bit_count <= 0;
+                sending: begin
+                    bit_count <= bit_count + 1;
+                    data <= {in,data[7:1]};
+                end
+                default:;
+            endcase
+    end
+
+    assign done = (state == stop);
+    assign out_byte = data;
+    endmodule
   ```
-- J
+- 带奇偶校验的串口接收器(Serial receiver with parity checking)
+  ```Verilog
+  // 这题用自己的思路怎么调试都通过不了仿真，人麻了。参考了下一个知乎网友的答案，直接用接受数据的0~7索引值当做状态值，状态转移逻辑的默认情况下索引自增，省去了数据接受状态和计数器，这个状态建模的思路和技巧着实令人惊奇
+    module top_module(
+        input clk,
+        input in,
+        input reset,    // Synchronous reset
+        output [7:0] out_byte,
+        output done
+    ); //
+        
+        // Modify FSM and datapath from Fsm_serialdata
+        parameter START = 0, CHECK = 9, STOP = 10, IDEL = 11, ERROR = 12;
+        reg [4:0] state, next_state;
+        reg valid, start;
+
+        always @(*) begin
+            start = 0;
+            case (state)
+                IDEL: begin next_state = in ? IDEL : START; start = 1; end
+                STOP: begin next_state = in ? IDEL : START; start = 1; end
+                CHECK: next_state = in ? STOP : ERROR;
+                ERROR: next_state = in ? IDEL : ERROR;
+                default: next_state = state + 1;
+            endcase  
+        end
+        
+        always @(posedge clk)
+            if (reset)
+                state <= IDEL;
+            else begin
+                state <= next_state;
+                valid <= odd;
+            end
+        
+        always @(posedge clk)
+            if ((0 <= state) & (state < 8))
+                out_byte[state] <= in;
+        
+        wire odd;
+        parity check(clk, reset | start, in, odd);
+        
+        assign done = (valid & (state == STOP));
+        // New: Add parity checking.
+        
+    endmodule
+  ```
+- 序列识别(Sequence recognition)
+  ```Verilog
+  //
+    module top_module(
+        input clk,
+        input reset,    // Synchronous reset
+        input in,
+        output disc,
+        output flag,
+        output err);
+
+        //in为0时进入序列1的计数状态，再次检测到in为0时结束序列1的计数状态
+        //若计数器值为5，则输出disc
+        //若计数器值为6，则输出flag
+        //若计数器值为7，则输出err
+        //复位信号将会清除计数器并将所有输出信号清零
+
+        int cnt;
+        parameter head = 0, counting = 1, tail = 2, idle = 3;
+        reg [1:0] state, next_state;
+
+        always @(*) begin
+            case (state)
+                idle: 
+                    next_state = in ? idle : head;
+
+                head: 
+                    next_state = counting;
+
+                counting: 
+                    next_state = in ? counting : tail;
+
+                tail: 
+                    next_state = (cnt >= 5) ? tail : idle;
+            endcase
+        end
+
+        always @(posedge clk) begin
+            if (reset)
+                state <= idle;
+            else 
+                state <= next_state;
+        end
+
+        always @(posedge clk ) begin
+            if(reset)
+                cnt <= 0;
+            else 
+                cnt <= (state == counting) ? cnt + 1 : 
+                (state == tail ? cnt : 0);
+        end
+
+        assign disc = (state == tail && cnt == 5);
+        assign flag = (state == tail && cnt == 6);
+        assign err = (state == tail && cnt >= 7);
+
+    endmodule
+  ```
+- Q8:设计米利状态机
   ```Verilog
   //
 
   ```
-- J
+- Q5a:摩尔状态机的串口比较器(Serial two's complemetor(Moore FSM))
   ```Verilog
   //
 
   ```
-- J
+- Q5b:米利状态机的串口比较器(Serial two's complemetor(Moore FSM))
   ```Verilog
   //
 
   ```
+- Q3a:状态机(FSM)
+  ```Verilog
+  //
+
+  ```
+- Q3b:状态机(FSM)
+  ```Verilog
+  //
+
+  ```
+- Q3c:状态机逻辑(FSM logic)
+  ```Verilog
+  //
+
+  ```
+- Q6b:状态机迭代逻辑(FSM next-state logic)
+  ```Verilog
+  //
+
+  ```
+- Q6c:独热码状态机迭代逻辑(FSM one-hot next-state logic)
+  ```Verilog
+  //
+
+  ```
+- Q6:状态机(FSM)
+  ```Verilog
+  //
+
+  ```
+- Q2a:状态机(FSM)
+  ```Verilog
+  //
+
+  ```
+- Q2b:状态机(FSM)
+  ```Verilog
+  //
+
+  ```
+- Q2a:状态机(FSM)
+  ```Verilog
+  //
+
+  ```
+- Q2b:另一个状态机(Another FSM)
+  ```Verilog
+  //
+
+  ```
+
 ## 构建更大规模电路(Building larger Circuits)
 - J
   ```Verilog
@@ -1754,4 +2021,511 @@
   ```Verilog
   //
 
+  ```
+
+# 验证:读仿真波形(Verification:Reading Simulations)
+## 寻找代码Bug（Finding Bugs in code）
+- 二路选择器(MUX)
+  ```Verilog
+  // 注意位宽匹配
+    module top_module (
+        input sel,
+        input [7:0] a,
+        input [7:0] b,
+        output [7:0] out  );
+
+        assign out = sel ? a : b;
+
+    endmodule
+  ```
+- 与非门(NAND)
+  ```Verilog
+  //调用模块时字典传参，结果注意取反
+    module andgate (output out, input a, input b, input c, input d, input e);
+
+        assign out = a & b & c & d & e;
+
+    endmodule
+
+    module top_module (input a, input b, input c, output out);
+
+        // 使用 andgate 实现三输入 NAND 门
+        wire temp;
+        andgate inst1 (.out(temp), .a(a), .b(b), .c(c), .d(1'b1), .e(1'b1));
+        assign out = ~temp;
+
+    endmodule
+  ```
+- 四路选择器(MUX)
+  ```Verilog
+  // 原题挖了很多坑，首先是命名混乱和重叠,其次wire线宽未定义，最后是sel选中逻辑，最低层应该共用选择信号sel[0]
+    module top_module (
+        input [1:0] sel,
+        input [7:0] a,
+        input [7:0] b,
+        input [7:0] c,
+        input [7:0] d,
+        output [7:0] out  ); //
+
+        wire [7:0] Y0, Y1;
+        mux2 mux0 ( sel[0],    a,    b, Y0 );
+        mux2 mux1 ( sel[0],    c,    d, Y1 );
+        mux2 mux_final ( sel[1], Y0, Y1,  out );
+
+    endmodule
+  ```
+- 加法减法器(Add/Sub)
+  ```Verilog
+  // 原题挖了两个坑，一个是out的判零逻辑不能用~out,其次是没有预支匹配的else块产生了latch导致仿真不通过
+    module top_module ( 
+        input do_sub,
+        input [7:0] a,
+        input [7:0] b,
+        output reg [7:0] out,
+        output reg result_is_zero
+    );//
+
+        always @(*) begin
+            case (do_sub)
+            0: out = a+b;
+            1: out = a-b;
+            endcase
+
+            if (out == 8'b0)
+                result_is_zero = 1;
+            else
+                result_is_zero = 0;
+        end
+
+    endmodule
+  ```
+- case声明(case statement)
+  ```Verilog
+  // 原题留了两个大坑:1 valid和out的case块没有完备; 2 在key3和key9那里进制和位长动了手脚。慢慢看波形的mismatch排查出问题
+    module top_module (
+        input [7:0] code,
+        output reg [3:0] out,
+        output reg valid=1 );//
+
+        always @(*)
+            case (code)
+                8'h45: begin out = 0; valid = 1; end
+                8'h16: begin out = 1; valid = 1; end
+                8'h1e: begin out = 2; valid = 1; end
+                8'h26: begin out = 3; valid = 1; end
+                8'h25: begin out = 4; valid = 1; end
+                8'h2e: begin out = 5; valid = 1; end
+                8'h36: begin out = 6; valid = 1; end
+                8'h3d: begin out = 7; valid = 1; end
+                8'h3e: begin out = 8; valid = 1; end
+                8'h46: begin out = 9; valid = 1; end
+                default: begin
+                    valid = 0;
+                    out = 0;
+                end 
+            endcase
+
+    endmodule
+  ```
+## 从仿真波形中构建电路(Build a circuit from simulation waveform)
+- 组合逻辑电路1()
+    ```Verilog
+    // 送分题不多解释了
+    module top_module (
+        input a,
+        input b,
+        output q );//
+
+        assign q = a & b; // Fix me
+
+    endmodule
+    ```
+- 组合逻辑电路2()
+  ```Verilog
+  // 我这懒狗无法容忍四变量的卡诺图化简，看波形规律不难发现这是个四输入偶数校验电路，四路输入中有偶数个1(0个也算偶数)，输出就为1
+    module top_module (
+        input a,
+        input b,
+        input c,
+        input d,
+        output q );//
+
+        assign q = ~(a ^ b ^ c ^ d); // Fix me
+
+    endmodule
+  ```
+- 组合逻辑电路3()
+  ```Verilog
+  // 看图找规律，这题波形可以看得出q凸起的部分，cd输入波形都是有共性的，然而有共性的第一段却没凸起，此时观察ab发现都是低电平，凸起的部分ab至少有一个高电平。再分析cd凸起部分的共性，cd至少一个是高电平，至此逻辑完成。
+    module top_module (
+        input a,
+        input b,
+        input c,
+        input d,
+        output q );//
+
+        assign q = (a | b) & (c | d);
+
+    endmodule
+  ```
+- 组合逻辑电路4()
+  ```Verilog
+  // 这题直接看输出波形的凸起部分不容易看出端倪，换个视角看凹陷部分，仅仅在bc都为低电平时q才为低电平
+    module top_module (
+        input a,
+        input b,
+        input c,
+        input d,
+        output q );//
+
+        assign q = b | c; // Fix me
+
+    endmodule
+  ```
+- 组合逻辑电路5()
+  ```Verilog
+  // 看了好一会原来是个选择器电路
+    module top_module (
+        input [3:0] a,
+        input [3:0] b,
+        input [3:0] c,
+        input [3:0] d,
+        input [3:0] e,
+        output [3:0] q );
+
+        always @(*) begin
+            case(c)
+                4'b0000: q = b;
+                4'b0001: q = e;
+                4'b0010: q = a;
+                4'b0011: q = d;
+                default: q = 4'b1111; // Default case to handle unexpected values
+            endcase
+        end
+
+    endmodule
+  ```
+- 组合逻辑电路6()
+  ```Verilog
+  // 又中了出题者的空城计，还以为有什么映射规律，仍然是个case语句，然而这题踩了个大坑就是16进制位长我声明为4了导致结果怎么都不对，最后是在VSCode的Verilog语法检查器下才发觉的。
+    module top_module (
+        input [2:0] a,
+        output [15:0] q ); 
+
+        always @(*) begin
+            case(a)
+                3'b000: q = 16'h1232;
+                3'b001: q = 16'haee0;
+                3'b010: q = 16'h27d4;
+                3'b011: q = 16'h5a0e;
+                3'b100: q = 16'h2066;
+                3'b101: q = 16'h64ce;
+                3'b110: q = 16'hc526;
+                3'b111: q = 16'h2f19;
+                default: q = 16'h0000;
+            endcase
+        end
+
+    endmodule
+  ```
+- 时序逻辑电路7()
+  ```Verilog
+  // 送分题
+    module top_module (
+        input clk,
+        input a,
+        output q );
+
+        always @(posedge clk ) begin
+            q = ~a;
+        end
+
+    endmodule
+  ```
+- 时序逻辑电路8()
+  ```Verilog
+  // p高电平保持，低电平为a。这题又困了好一会，因为q的逻辑误解为了每逢下降沿则翻转导致q仿真波形一直是相反的，还在纠结q的赋初值问题，实际q的赋值逻辑是下降沿为p。
+    module top_module (
+        input clock,
+        input a,
+        output p,
+        output q );
+
+        always @(negedge clock) begin
+            q <= p;
+        end
+
+        assign p = (clock) ? a : p;
+
+    endmodule
+  ```
+- 时序逻辑电路9()
+  ```Verilog
+  // 带同步复位的7进制计数器逻辑
+    module top_module (
+        input clk,
+        input a,
+        output [3:0] q );
+
+        always @(posedge clk) begin
+            if(a)
+                q <= 4;
+            else
+                q <= (q == 6) ? 0 : q + 1;
+        end
+
+    endmodule
+  ```
+- 时序逻辑电路10()
+  ```Verilog
+  // 这题观察q的波形很容易看出state决定着输出同或还是异或，然而state的迭代规则用自己的卡诺图错位波形怎么都得不出正确结果，实在忍不了了还是参考网友答案的。
+    module top_module (
+        input clk,
+        input a,
+        input b,
+        output q,
+        output state  );
+
+        always @(posedge clk ) begin
+            if(a & b) state <= 1;
+            else if(~a & ~b) state <= 0;
+            else state <= state;
+        end
+        assign q = state ? ~(a ^ b) : (a ^ b);
+    endmodule
+
+  ```
+# 验证:编写TestBench
+- 时钟(Clock)
+  ```verilog
+  // 这题注意always和forever生成时钟脉冲的区别，initial块内尽量用forever，always虽也能用但更常用的还是设计综合语法居多。
+    module top_module ( );
+        reg clk;
+        
+        dut test(.clk (clk));
+        initial begin
+            clk = 0;
+            forever #5 clk = ~clk;
+        end
+    endmodule
+  ```
+- TestBench1
+  ```verilog
+  // 这题坑点是不熟悉Verilog仿真语法,#后接的数字是相对上一次#后经过的时间，而不是绝对时间轴时间
+  module top_module ( output reg A, output reg B );//
+
+    // generate input patterns here
+    initial begin
+		A = 0; B = 0;
+        #10 A=1;
+        #5 B=1;
+        #5 A=0;
+        #20 B=0;
+    end
+
+    endmodule
+  ```
+- 与门(AND gate)
+  ```verilog
+  // 这题只管给输入in合适的激励信号，至于输出Out是怎样的不用管，另外不要在仿真末尾调用$finish不然会提前结束仿真通不过。
+    module top_module();
+        reg [1:0] in;
+        reg out;
+
+        andgate test(.in (in), .out (out));
+        initial begin
+            in = 2'b00; 
+            #10 in = 2'b01; 
+            #10 in = 2'b10; 
+            #10 in = 2'b11;
+        end
+    endmodule
+  ```
+- TestBench2()
+  ```verilog
+  // 这题又踩坑了，把时钟clk的仿真信号和输入的仿真信号放在一个initial块内，导致forever块后的仿真一直未能执行。
+    module top_module();
+        reg clk;
+        reg in;
+        reg [2:0] s;
+        reg out;
+
+        q7 test(.clk(clk), .in(in), .s(s), .out(out));
+
+        initial begin
+            clk = 0; 
+            forever #5 clk = ~clk;
+        end
+        
+        initial begin
+            in = 0; s = 3'd2;
+            #10 s = 3'd6;
+            #10 s = 3'd2; in = 1;
+            #10 s = 3'd7; in = 0;
+            #10 s = 3'd0; in = 1;
+            #30 in = 0;
+        end
+    endmodule
+  ```
+- T触发器(T flip-flop)
+  ```verilog
+  // 由于对Verilog仿真语法的不熟悉，不知道仿真信号什么时候通过initial块生成，什么时候也可以用时序逻辑生成，这题还是参考网友答案的有点懵，虽然simulation部分写完了但基本踩了很多坑参考了网友答案的，得好好补补这部分的语法知识。
+    module top_module ();
+        reg clk;
+        reg reset;
+        reg t;
+        reg q;
+
+        tff test(.clk(clk), .reset(reset), .t(t), .q(q));
+
+        initial begin
+            clk = 0;
+            forever #5 clk = ~clk;
+        end
+
+        initial begin
+            reset = 0;
+            #10 reset = 1;
+            #10 reset = 0;
+        end
+
+        always @(posedge clk) begin
+            if(reset)
+                t <= 0;
+            else
+                t <= 1;
+        end
+    endmodule
+  ```
+# CS450
+- 定时器(timer)
+  ```verilog
+  // 因为没捋清count的自减逻辑把自减逻辑写在另一个if else块了，看似简单的需求并没有一遍过
+    module top_module(
+        input clk, 
+        input load, 
+        input [9:0] data, 
+        output tc
+    );
+        reg [9:0] count;
+
+        always @(posedge clk ) begin
+            if(load)
+                count <= data;
+            else
+                if(count != 10'b0)
+                    count <= count - 1;
+        end
+
+        assign tc = (count == 10'b0);
+
+    endmodule
+  ```
+- 饱和计数器(counter 2bc)
+  ```verilog
+  // 看题干背景分支预测一堆描述，本以为要用状态机的，结果就是一饱和计数器逻辑
+    module top_module(
+        input clk,
+        input areset,
+        input train_valid,
+        input train_taken,
+        output [1:0] state
+    );
+        reg[1:0] count;
+
+
+        always @(posedge clk or posedge areset) begin
+            if(areset)
+                count <= 2'b01;
+            else
+                casez({train_valid, train_taken})
+                    2'b0x: count <= count; 
+                    2'b10: count <= (count == 3'b00) ? count : count - 1;
+                    2'b11: count <= (count == 3'b11) ? count : count + 1;
+                endcase
+        end
+
+        assign state = count;
+
+    endmodule
+  ```
+- 历史移位寄存器(history shift)
+  ```verilog
+  // 这题最大的难度是读懂题意。
+    module top_module(
+        input clk,
+        input areset,
+
+        input predict_valid,
+        input predict_taken,
+        output [31:0] predict_history,
+
+        input train_mispredicted,
+        input train_taken,
+        input [31:0] train_history
+    );
+
+        always @(posedge clk , posedge areset) begin
+            if(areset)
+                predict_history <= 32'b0;
+            else
+                if(train_mispredicted) 
+                    predict_history <= {train_history[30:0], train_taken};
+                else if(predict_valid)
+                    predict_history <= {predict_history[30:0], predict_taken};
+                else
+                    predict_history <= predict_history;
+        end
+
+    endmodule
+  ```
+- gshare分支预测(gshare predictor)
+  ```verilog
+  // 实在过不了仿真也看不懂题意耻辱收尾，还是参考了网友答案，看题解貌似是综合运用了前几题的相关逻辑，怪不着这个系列题没更新下去了，感觉没点计算机体系结构的前置知识还是不好做的
+    module top_module(
+        input clk,
+        input areset,
+
+        input  predict_valid,
+        input  [6:0] predict_pc,
+        output predict_taken,
+        output [6:0] predict_history,
+
+        input train_valid,
+        input train_taken,
+        input train_mispredicted,
+        input [6:0] train_history,
+        input [6:0] train_pc
+    );
+        
+        reg[1:0] PHT[127:0];
+        
+        always@(posedge clk or posedge areset)
+            begin
+                if(areset)
+                    begin
+                        predict_history<=0;
+                        for(int i=0;i<128;i++)
+                            PHT[i]<=2'b01;
+                    end
+                else
+                    begin
+                        if(train_valid && train_mispredicted)
+                            predict_history<={train_history[6:0],train_taken};
+                        else if(predict_valid)
+                            predict_history<={predict_history[6:0],predict_taken};
+                        
+                        if(train_valid)
+                            begin
+                                if(train_taken)
+                                    PHT[train_history^train_pc]<=(PHT[train_history^train_pc]==2'b11)?2'b11:(PHT[train_history^train_pc]+1);
+                                else	
+                                    PHT[train_history^train_pc]<=(PHT[train_history^train_pc]==2'b00)?2'b00:(PHT[train_history^train_pc]-1);
+                            end
+                    end
+            end
+        
+        assign predict_taken = PHT[predict_history^predict_pc][1];
+
+    endmodule
   ```
